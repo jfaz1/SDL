@@ -415,6 +415,7 @@ add_sdl_test_executable(testdlopennote TESTUTILS SOURCES testdlopennote.c NAME83
 add_sdl_test_executable(testgeometry TESTUTILS SOURCES testgeometry.c NAME83 geometry)
 add_sdl_test_executable(testgl SOURCES testgl.c NAME83 gl)
 add_sdl_test_executable(testgles SOURCES testgles.c NAME83 tstgles NAME83 gles)
+add_sdl_test_executable(testgpu_resource_layout NONINTERACTIVE NONINTERACTIVE_TIMEOUT 30 SOURCES testgpu_resource_layout.c NAME83 gpurlay)
 add_sdl_test_executable(testgpu_simple_clear SOURCES testgpu_simple_clear.c NAME83 gpuclear)
 add_sdl_test_executable(testgpu_spinning_cube SOURCES testgpu_spinning_cube.c ${icon_png_header} DEPENDS generate-icon_png_header NAME83 gpucube)
 add_sdl_test_executable(testgpurender_effects MAIN_CALLBACKS NEEDS_RESOURCES TESTUTILS SOURCES testgpurender_effects.c NAME83 gpufx)

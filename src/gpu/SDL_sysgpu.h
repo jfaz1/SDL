@@ -60,6 +60,7 @@ typedef struct ComputePass
     bool read_only_storage_texture_bound[MAX_STORAGE_TEXTURES_PER_STAGE];
     bool read_only_storage_buffer_bound[MAX_STORAGE_BUFFERS_PER_STAGE];
     bool read_write_storage_texture_bound[MAX_COMPUTE_WRITE_TEXTURES];
+    SDL_GPUTextureType read_write_storage_texture_types[MAX_COMPUTE_WRITE_TEXTURES];
     bool read_write_storage_buffer_bound[MAX_COMPUTE_WRITE_BUFFERS];
 } ComputePass;
 
@@ -101,6 +102,52 @@ typedef struct TextureCommonHeader
     SDL_GPUTextureCreateInfo info;
 } TextureCommonHeader;
 
+static inline bool SDL_GPUTextureHeaderInit(
+    TextureCommonHeader *header,
+    const SDL_GPUTextureCreateInfo *createinfo)
+{
+    header->info = *createinfo;
+
+    header->info.props = 0;
+    if (createinfo->props) {
+        header->info.props = SDL_CreateProperties();
+        if (!header->info.props) {
+            return false;
+        }
+        if (!SDL_CopyProperties(createinfo->props, header->info.props)) {
+            SDL_DestroyProperties(header->info.props);
+            header->info.props = 0;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static inline void SDL_GPUTextureHeaderDestroy(
+    TextureCommonHeader *header)
+{
+    if (header->info.props) {
+        SDL_DestroyProperties(header->info.props);
+        header->info.props = 0;
+    }
+}
+
+typedef struct BufferCommonHeader
+{
+    SDL_GPUBufferUsageFlags usage;
+    Uint32 size;
+} BufferCommonHeader;
+
+static inline void SDL_GPUBufferHeaderInit(
+    BufferCommonHeader *header,
+    SDL_GPUBufferUsageFlags usage,
+    Uint32 size)
+{
+    header->usage = usage;
+    header->size = size;
+}
+
 typedef struct GraphicsPipelineCommonHeader
 {
     Uint32 num_vertex_samplers;
@@ -114,6 +161,32 @@ typedef struct GraphicsPipelineCommonHeader
     Uint32 num_fragment_uniform_buffers;
 } GraphicsPipelineCommonHeader;
 
+typedef struct SDL_GPUShaderResourceLayoutFacts
+{
+    SDL_GPUShaderStage stage;
+    Uint32 num_samplers;
+    Uint32 num_storage_textures;
+    Uint32 num_storage_buffers;
+    Uint32 num_uniform_buffers;
+    const SDL_GPUSampledTextureSlotDescription *sampled_texture_slots;
+    const SDL_GPUStorageTextureSlotDescription *storage_texture_slots;
+    bool sampled_texture_slots_authoritative;
+} SDL_GPUShaderResourceLayoutFacts;
+
+typedef struct SDL_GPUComputePipelineResourceLayoutFacts
+{
+    Uint32 num_samplers;
+    Uint32 num_readonly_storage_textures;
+    Uint32 num_readonly_storage_buffers;
+    Uint32 num_readwrite_storage_textures;
+    Uint32 num_readwrite_storage_buffers;
+    Uint32 num_uniform_buffers;
+    const SDL_GPUSampledTextureSlotDescription *sampled_texture_slots;
+    const SDL_GPUStorageTextureSlotDescription *readonly_storage_texture_slots;
+    const SDL_GPUStorageTextureSlotDescription *readwrite_storage_texture_slots;
+    bool sampled_texture_slots_authoritative;
+} SDL_GPUComputePipelineResourceLayoutFacts;
+
 typedef struct ComputePipelineCommonHeader
 {
     Uint32 numSamplers;
@@ -122,7 +195,161 @@ typedef struct ComputePipelineCommonHeader
     Uint32 numReadWriteStorageTextures;
     Uint32 numReadWriteStorageBuffers;
     Uint32 numUniformBuffers;
+    SDL_GPUTextureType readWriteStorageTextureTypes[MAX_COMPUTE_WRITE_TEXTURES];
+    bool readWriteStorageTextureTypesKnown[MAX_COMPUTE_WRITE_TEXTURES];
 } ComputePipelineCommonHeader;
+
+static inline bool SDL_GPU_SampledTextureSlotsHaveSamplerlessSlots(
+    const SDL_GPUSampledTextureSlotDescription *sampled_texture_slots,
+    Uint32 num_samplers)
+{
+    if (!sampled_texture_slots) {
+        return false;
+    }
+    for (Uint32 i = 0; i < num_samplers; i += 1) {
+        if (sampled_texture_slots[i].sampler_type == SDL_GPU_SHADERSAMPLERTYPE_NONE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool SDL_GPU_ShaderResourceLayoutFactsHaveSamplerlessSlots(
+    const SDL_GPUShaderResourceLayoutFacts *facts)
+{
+    return facts &&
+           SDL_GPU_SampledTextureSlotsHaveSamplerlessSlots(
+               facts->sampled_texture_slots,
+               facts->num_samplers);
+}
+
+static inline bool SDL_GPU_ComputePipelineResourceLayoutFactsHaveSamplerlessSlots(
+    const SDL_GPUComputePipelineResourceLayoutFacts *facts)
+{
+    return facts &&
+           SDL_GPU_SampledTextureSlotsHaveSamplerlessSlots(
+               facts->sampled_texture_slots,
+               facts->num_samplers);
+}
+
+typedef struct SDL_GPUSampledTextureSlotLayout
+{
+    SDL_GPUTextureType texture_type;
+    SDL_GPUShaderTextureSampleType sample_type;
+    SDL_GPUShaderSamplerType sampler_type;
+    bool has_sampler;
+    bool multisampled;
+    bool known;
+} SDL_GPUSampledTextureSlotLayout;
+
+static inline void SDL_GPU_InitDefaultSampledTextureSlotLayout(
+    SDL_GPUSampledTextureSlotLayout *layout,
+    bool known)
+{
+    layout->texture_type = SDL_GPU_TEXTURETYPE_2D;
+    layout->sample_type = SDL_GPU_SHADERTEXTURESAMPLETYPE_FILTERABLE_FLOAT;
+    layout->sampler_type = SDL_GPU_SHADERSAMPLERTYPE_FILTERING;
+    layout->has_sampler = true;
+    layout->multisampled = false;
+    layout->known = known;
+}
+
+static inline SDL_GPUShaderTextureSampleType SDL_GPU_NormalizeSampledTextureSampleType(
+    SDL_GPUShaderTextureSampleType sample_type,
+    bool *multisampled)
+{
+    switch (sample_type) {
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_MULTISAMPLED_UNFILTERABLE_FLOAT:
+        *multisampled = true;
+        return SDL_GPU_SHADERTEXTURESAMPLETYPE_UNFILTERABLE_FLOAT;
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_MULTISAMPLED_DEPTH:
+        *multisampled = true;
+        return SDL_GPU_SHADERTEXTURESAMPLETYPE_DEPTH;
+    default:
+        *multisampled = false;
+        return sample_type;
+    }
+}
+
+static inline void SDL_GPU_FillSampledTextureSlotLayouts(
+    SDL_GPUSampledTextureSlotLayout *layouts,
+    Uint32 num_layouts,
+    const SDL_GPUSampledTextureSlotDescription *slot_descriptions,
+    Uint32 num_slot_descriptions,
+    bool authoritative)
+{
+    Uint32 i;
+    Uint32 description_count = slot_descriptions ? SDL_min(num_layouts, num_slot_descriptions) : 0;
+
+    for (i = 0; i < num_layouts; i += 1) {
+        SDL_GPU_InitDefaultSampledTextureSlotLayout(&layouts[i], authoritative);
+    }
+    for (i = 0; i < description_count; i += 1) {
+        layouts[i].texture_type = slot_descriptions[i].texture_type;
+        layouts[i].sample_type = SDL_GPU_NormalizeSampledTextureSampleType(
+            slot_descriptions[i].sample_type,
+            &layouts[i].multisampled);
+        layouts[i].sampler_type = slot_descriptions[i].sampler_type;
+        layouts[i].has_sampler = slot_descriptions[i].sampler_type != SDL_GPU_SHADERSAMPLERTYPE_NONE;
+        layouts[i].known = true;
+    }
+}
+
+static inline void SDL_GPU_FillStorageTextureTypes(
+    SDL_GPUTextureType *types,
+    Uint32 num_types,
+    const SDL_GPUStorageTextureSlotDescription *slot_descriptions,
+    Uint32 num_slot_descriptions)
+{
+    Uint32 i;
+    Uint32 description_count = slot_descriptions ? SDL_min(num_types, num_slot_descriptions) : 0;
+
+    for (i = 0; i < num_types; i += 1) {
+        types[i] = SDL_GPU_TEXTURETYPE_2D;
+    }
+    for (i = 0; i < description_count; i += 1) {
+        types[i] = slot_descriptions[i].texture_type;
+    }
+}
+
+static inline bool SDL_GPU_StorageTextureSlotsHaveType(
+    const SDL_GPUStorageTextureSlotDescription *slots,
+    Uint32 num_slots,
+    SDL_GPUTextureType type)
+{
+    Uint32 i;
+
+    if (!slots) {
+        return false;
+    }
+    for (i = 0; i < num_slots; i += 1) {
+        if (slots[i].texture_type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline void SDL_GPU_FillStorageTextureTypeLayouts(
+    SDL_GPUTextureType *types,
+    bool *types_known,
+    Uint32 num_types,
+    const SDL_GPUStorageTextureSlotDescription *slot_descriptions,
+    Uint32 num_slot_descriptions)
+{
+    Uint32 i;
+    Uint32 description_count = slot_descriptions ? SDL_min(num_types, num_slot_descriptions) : 0;
+
+    SDL_GPU_FillStorageTextureTypes(
+        types,
+        num_types,
+        slot_descriptions,
+        num_slot_descriptions);
+
+    for (i = 0; i < num_types; i += 1) {
+        types_known[i] = i < description_count;
+    }
+}
 
 typedef struct BlitFragmentUniforms
 {
@@ -153,6 +380,56 @@ typedef struct BlitPipelineCacheEntry
 #define SDL_GPU_BLENDFACTOR_MAX_ENUM_VALUE          (SDL_GPU_BLENDFACTOR_SRC_ALPHA_SATURATE + 1)
 #define SDL_GPU_SWAPCHAINCOMPOSITION_MAX_ENUM_VALUE (SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084 + 1)
 #define SDL_GPU_PRESENTMODE_MAX_ENUM_VALUE          (SDL_GPU_PRESENTMODE_MAILBOX + 1)
+
+static inline bool SDL_GPUStorageTextureFormatSupportsReadOnlyOrWriteOnly(
+    SDL_GPUTextureFormat format)
+{
+    return format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ||
+           format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_SNORM ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT ||
+           format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+}
+
+static inline bool SDL_GPUStorageTextureFormatSupportsReadOnly(
+    SDL_GPUTextureFormat format)
+{
+    return SDL_GPUStorageTextureFormatSupportsReadOnlyOrWriteOnly(format);
+}
+
+static inline bool SDL_GPUStorageTextureFormatSupportsComputeReadOnly(
+    SDL_GPUTextureFormat format)
+{
+    return SDL_GPUStorageTextureFormatSupportsReadOnlyOrWriteOnly(format);
+}
+
+static inline bool SDL_GPUStorageTextureFormatSupportsWriteOnly(
+    SDL_GPUTextureFormat format)
+{
+    return SDL_GPUStorageTextureFormatSupportsReadOnlyOrWriteOnly(format);
+}
+
+static inline bool SDL_GPUStorageTextureFormatSupportsReadWrite(
+    SDL_GPUTextureFormat format)
+{
+    return format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT ||
+           format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_UINT ||
+           format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_INT ||
+           format == SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+}
 
 static inline Sint32 Texture_GetBlockWidth(
     SDL_GPUTextureFormat format)
@@ -425,6 +702,46 @@ static inline bool IsStencilFormat(
     }
 }
 
+static inline bool IsD24Format(
+    SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+static inline bool IsD24TargetOnlyTextureCreateInfo(
+    const SDL_GPUTextureCreateInfo *createinfo)
+{
+    return IsD24Format(createinfo->format) &&
+           (createinfo->type == SDL_GPU_TEXTURETYPE_2D ||
+            createinfo->type == SDL_GPU_TEXTURETYPE_2D_ARRAY) &&
+           createinfo->usage == SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET &&
+           createinfo->sample_count == SDL_GPU_SAMPLECOUNT_1;
+}
+
+static inline bool IsD24TargetPlusSamplerTextureCreateInfo(
+    const SDL_GPUTextureCreateInfo *createinfo)
+{
+    return IsD24Format(createinfo->format) &&
+           (createinfo->type == SDL_GPU_TEXTURETYPE_2D ||
+            createinfo->type == SDL_GPU_TEXTURETYPE_2D_ARRAY) &&
+           createinfo->usage == (SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+           createinfo->sample_count == SDL_GPU_SAMPLECOUNT_1;
+}
+
+static inline bool IsD24AcceptedTextureCreateInfo(
+    const SDL_GPUTextureCreateInfo *createinfo)
+{
+    return IsD24TargetOnlyTextureCreateInfo(createinfo) ||
+           IsD24TargetPlusSamplerTextureCreateInfo(createinfo);
+}
+
 static inline bool IsIntegerFormat(
     SDL_GPUTextureFormat format)
 {
@@ -443,6 +760,167 @@ static inline bool IsIntegerFormat(
     case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_INT:
         return true;
 
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatIsSignedIntegerSample(
+    SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_R8_INT:
+    case SDL_GPU_TEXTUREFORMAT_R8G8_INT:
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_INT:
+    case SDL_GPU_TEXTUREFORMAT_R16_INT:
+    case SDL_GPU_TEXTUREFORMAT_R16G16_INT:
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_INT:
+    case SDL_GPU_TEXTUREFORMAT_R32_INT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32_INT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_INT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatIsUnsignedIntegerSample(
+    SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_R8_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R8G8_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R16_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R16G16_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R32_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32_UINT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_UINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatSupportsUnfilterableFloatSample(
+    SDL_GPUTextureFormat format)
+{
+    if (IsDepthFormat(format)) {
+        return true;
+    }
+
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_R16_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16G16_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16_SNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16G16_SNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_SNORM:
+    case SDL_GPU_TEXTUREFORMAT_R32_FLOAT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT:
+    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatMatchesSampleType(
+    SDL_GPUTextureFormat format,
+    SDL_GPUShaderTextureSampleType sample_type)
+{
+    switch (sample_type) {
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_FILTERABLE_FLOAT:
+        return !IsDepthFormat(format) &&
+               !SDL_GPUTextureFormatIsSignedIntegerSample(format) &&
+               !SDL_GPUTextureFormatIsUnsignedIntegerSample(format);
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_UNFILTERABLE_FLOAT:
+        return SDL_GPUTextureFormatSupportsUnfilterableFloatSample(format);
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_DEPTH:
+        return IsDepthFormat(format);
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_SINT:
+        return SDL_GPUTextureFormatIsSignedIntegerSample(format);
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_UINT:
+        return SDL_GPUTextureFormatIsUnsignedIntegerSample(format);
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatIsAcceptedMultisampledSampledColor(
+    SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT:
+    case SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R11G11B10_UFLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatIsAcceptedMultisampledSampledDepth(
+    SDL_GPUTextureFormat format)
+{
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_D16_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_D32_FLOAT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureFormatMatchesMultisampledSampleType(
+    SDL_GPUTextureFormat format,
+    SDL_GPUShaderTextureSampleType sample_type)
+{
+    switch (sample_type) {
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_UNFILTERABLE_FLOAT:
+        return SDL_GPUTextureFormatIsAcceptedMultisampledSampledColor(format);
+    case SDL_GPU_SHADERTEXTURESAMPLETYPE_DEPTH:
+        return SDL_GPUTextureFormatIsAcceptedMultisampledSampledDepth(format);
+    default:
+        return false;
+    }
+}
+
+static inline bool SDL_GPUTextureCreateInfoIsAcceptedMultisampledSampledTexture(
+    const SDL_GPUTextureCreateInfo *createinfo)
+{
+    if (createinfo->sample_count <= SDL_GPU_SAMPLECOUNT_1 ||
+        !(createinfo->usage & SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        createinfo->type != SDL_GPU_TEXTURETYPE_2D ||
+        createinfo->layer_count_or_depth != 1 ||
+        createinfo->num_levels != 1) {
+        return false;
+    }
+
+    if (SDL_GPUTextureFormatIsAcceptedMultisampledSampledColor(createinfo->format)) {
+        return createinfo->usage == (SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    }
+    if (SDL_GPUTextureFormatIsAcceptedMultisampledSampledDepth(createinfo->format)) {
+        return createinfo->usage == (SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    }
+    return false;
+}
+
+static inline bool SDL_GPUSamplerTypeMatchesLayout(
+    SDL_GPUShaderSamplerType layout_type,
+    SDL_GPUShaderSamplerType sampler_type)
+{
+    switch (layout_type) {
+    case SDL_GPU_SHADERSAMPLERTYPE_FILTERING:
+        return sampler_type == SDL_GPU_SHADERSAMPLERTYPE_FILTERING ||
+               sampler_type == SDL_GPU_SHADERSAMPLERTYPE_NONFILTERING;
+    case SDL_GPU_SHADERSAMPLERTYPE_NONFILTERING:
+        return sampler_type == SDL_GPU_SHADERSAMPLERTYPE_NONFILTERING;
+    case SDL_GPU_SHADERSAMPLERTYPE_COMPARISON:
+        return sampler_type == SDL_GPU_SHADERSAMPLERTYPE_COMPARISON;
     default:
         return false;
     }
@@ -682,7 +1160,8 @@ struct SDL_GPUDevice
 
     SDL_GPUComputePipeline *(*CreateComputePipeline)(
         SDL_GPURenderer *driverData,
-        const SDL_GPUComputePipelineCreateInfo *createinfo);
+        const SDL_GPUComputePipelineCreateInfo *createinfo,
+        const SDL_GPUComputePipelineResourceLayoutFacts *layout_facts);
 
     SDL_GPUGraphicsPipeline *(*CreateGraphicsPipeline)(
         SDL_GPURenderer *driverData,
@@ -694,7 +1173,8 @@ struct SDL_GPUDevice
 
     SDL_GPUShader *(*CreateShader)(
         SDL_GPURenderer *driverData,
-        const SDL_GPUShaderCreateInfo *createinfo);
+        const SDL_GPUShaderCreateInfo *createinfo,
+        const SDL_GPUShaderResourceLayoutFacts *layout_facts);
 
     SDL_GPUTexture *(*CreateTexture)(
         SDL_GPURenderer *driverData,
@@ -785,7 +1265,7 @@ struct SDL_GPUDevice
 
     // Render Pass
 
-    void (*BeginRenderPass)(
+    bool (*BeginRenderPass)(
         SDL_GPUCommandBuffer *commandBuffer,
         const SDL_GPUColorTargetInfo *colorTargetInfos,
         Uint32 numColorTargets,
@@ -1231,6 +1711,7 @@ extern "C" {
 extern SDL_GPUBootstrap VulkanDriver;
 extern SDL_GPUBootstrap D3D12Driver;
 extern SDL_GPUBootstrap MetalDriver;
+extern SDL_GPUBootstrap WebGPUDriver;
 extern SDL_GPUBootstrap PrivateGPUDriver;
 
 #ifdef __cplusplus

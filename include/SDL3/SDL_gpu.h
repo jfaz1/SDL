@@ -118,13 +118,13 @@
  *
  * Graphics and compute pipelines require the use of shaders, which as
  * mentioned above are small programs executed on the GPU. Each backend
- * (Vulkan, Metal, D3D12) requires a different shader format. When the app
- * creates the GPU device, the app lets the device know which shader formats
- * the app can provide. It will then select the appropriate backend depending
- * on the available shader formats and the backends available on the platform.
- * When creating shaders, the app must provide the correct shader format for
- * the selected backend. If you would like to learn more about why the API
- * works this way, there is a detailed
+ * (Vulkan, Metal, D3D12, WebGPU) requires a different shader format. When
+ * the app creates the GPU device, the app lets the device know which shader
+ * formats the app can provide. It will then select the appropriate backend
+ * depending on the available shader formats and the backends available on the
+ * platform. When creating shaders, the app must provide the correct shader
+ * format for the selected backend. If you would like to learn more about why
+ * the API works this way, there is a detailed
  * [blog post](https://moonside.games/posts/layers-all-the-way-down/)
  * explaining this situation.
  *
@@ -265,6 +265,15 @@
  *   GPU
  * - iOS/tvOS requires an A9 GPU or newer
  * - iOS Simulator and tvOS Simulator are unsupported
+ *
+ * ### WebGPU
+ *
+ * SDL driver name: "webgpu"
+ *
+ * Supported when SDL is built for Emscripten with the Emscripten video driver
+ * and GPU support enabled. SDL must be built as a static library for this
+ * backend. Requires browser and hardware WebGPU support. This backend accepts
+ * WGSL shaders through SDL_GPU_SHADERFORMAT_WGSL.
  *
  * ## Coordinate System
  *
@@ -891,11 +900,13 @@ typedef enum SDL_GPUTextureFormat
  * shader A that only writes into the texture and shader B that only reads
  * from the texture and bind the same texture to either shader respectively.
  * SIMULTANEOUS means that you can do reads and writes within the same shader
- * or compute pass. It also implies that atomic ops can be used, since those
- * are read-modify-write operations. If you use SIMULTANEOUS, you are
- * responsible for avoiding data races, as there is no data synchronization
- * within a compute pass. Note that SIMULTANEOUS usage is only supported by a
- * limited number of texture formats.
+ * or compute pass. If a backend and shader language expose storage texture
+ * atomic operations, SIMULTANEOUS usage is required for them, since atomics
+ * are read-modify-write operations. Unsupported atomic texture operations are
+ * still rejected by the backend. If you use SIMULTANEOUS, you are responsible
+ * for avoiding data races, as there is no data synchronization within a
+ * compute pass. Note that SIMULTANEOUS usage is only supported by a limited
+ * number of texture formats.
  *
  * \since This datatype is available since SDL 3.2.0.
  *
@@ -930,8 +941,9 @@ typedef enum SDL_GPUTextureType
 /**
  * Specifies the sample count of a texture.
  *
- * Used in multisampling. Note that this value only applies when the texture
- * is used as a render target.
+ * Used in multisampling. This value primarily applies when the texture is used
+ * as a render target; shader resource layout facts can also describe
+ * multisampled sampled-texture slots.
  *
  * \since This enum is available since SDL 3.2.0.
  *
@@ -1037,6 +1049,7 @@ typedef Uint32 SDL_GPUShaderFormat;
 #define SDL_GPU_SHADERFORMAT_DXIL     (1u << 3) /**< DXIL SM6_0 shaders for D3D12. */
 #define SDL_GPU_SHADERFORMAT_MSL      (1u << 4) /**< MSL shaders for Metal. */
 #define SDL_GPU_SHADERFORMAT_METALLIB (1u << 5) /**< Precompiled metallib shaders for Metal. */
+#define SDL_GPU_SHADERFORMAT_WGSL     (1u << 6) /**< WGSL shaders for the WebGPU backend. Shaders must follow SDL's documented WebGPU binding convention and supported resource subset. */
 
 /**
  * Specifies the format of a vertex attribute.
@@ -1727,9 +1740,203 @@ typedef struct SDL_GPUColorTargetBlendState
     Uint8 padding2;
 } SDL_GPUColorTargetBlendState;
 
+/**
+ * The sampled texture type used by a shader texture/sampler slot.
+ *
+ * This is used by shader resource layout facts to describe the layout of an
+ * existing SDL sampler slot. It does not add new shader resource slots; the
+ * corresponding create-info resource counts still define how many slots exist.
+ *
+ * The MULTISAMPLED_* values describe shader-visible multisampled texture
+ * slots. They require SDL_GPU_SHADERSAMPLERTYPE_NONE layout facts and 2D
+ * textures whose backing texture sample count is greater than 1.
+ *
+ * \since This enum is available since SDL 3.6.0.
+ *
+ * \sa SDL_GPUSampledTextureSlotDescription
+ */
+typedef enum SDL_GPUShaderTextureSampleType
+{
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_FILTERABLE_FLOAT,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_UNFILTERABLE_FLOAT,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_DEPTH,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_SINT,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_UINT,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_MULTISAMPLED_UNFILTERABLE_FLOAT,
+    SDL_GPU_SHADERTEXTURESAMPLETYPE_MULTISAMPLED_DEPTH
+} SDL_GPUShaderTextureSampleType;
 
 /**
- * A structure specifying code and metadata for creating a shader object.
+ * The sampler binding type used by a shader texture/sampler slot.
+ *
+ * This is used by shader resource layout facts to describe the layout of an
+ * existing SDL sampler slot. Filtering layouts accept filtering or
+ * non-filtering non-comparison sampler objects; non-filtering layouts require
+ * all-nearest non-comparison sampler objects; comparison layouts require
+ * comparison sampler objects. NONE layouts have no paired sampler binding;
+ * callers must bind a texture with a NULL sampler for those slots.
+ *
+ * \since This enum is available since SDL 3.6.0.
+ *
+ * \sa SDL_GPUSampledTextureSlotDescription
+ */
+typedef enum SDL_GPUShaderSamplerType
+{
+    SDL_GPU_SHADERSAMPLERTYPE_FILTERING,
+    SDL_GPU_SHADERSAMPLERTYPE_NONFILTERING,
+    SDL_GPU_SHADERSAMPLERTYPE_COMPARISON,
+    SDL_GPU_SHADERSAMPLERTYPE_NONE
+} SDL_GPUShaderSamplerType;
+
+/**
+ * The storage access used by a shader storage texture slot.
+ *
+ * This is used by shader resource layout facts to describe the layout of an
+ * existing SDL storage texture slot.
+ *
+ * \since This enum is available since SDL 3.6.0.
+ *
+ * \sa SDL_GPUStorageTextureSlotDescription
+ */
+typedef enum SDL_GPUStorageTextureAccess
+{
+    SDL_GPU_STORAGETEXTUREACCESS_READ_ONLY,
+    SDL_GPU_STORAGETEXTUREACCESS_WRITE_ONLY,
+    SDL_GPU_STORAGETEXTUREACCESS_READ_WRITE
+} SDL_GPUStorageTextureAccess;
+
+/**
+ * A structure specifying shader resource layout facts for one sampled
+ * texture/sampler slot.
+ *
+ * Each entry describes SDL sampler slot N counted by the shader or
+ * compute-pipeline create-info `num_samplers` field. Most sampler types
+ * describe a paired sampled texture and sampler binding. For
+ * SDL_GPU_SHADERSAMPLERTYPE_NONE, the slot has only a sampled texture binding
+ * and no paired sampler binding.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_GPUShaderResourceLayout
+ * \sa SDL_GPUComputePipelineResourceLayout
+ */
+typedef struct SDL_GPUSampledTextureSlotDescription
+{
+    SDL_GPUTextureType texture_type;              /**< The texture type used by the sampled texture binding. */
+    SDL_GPUShaderTextureSampleType sample_type;   /**< The sample type used by the sampled texture binding. */
+    SDL_GPUShaderSamplerType sampler_type;        /**< The sampler binding type used by the paired sampler binding, or SDL_GPU_SHADERSAMPLERTYPE_NONE for samplerless slots. */
+} SDL_GPUSampledTextureSlotDescription;
+
+/**
+ * A structure specifying shader resource layout facts for one storage texture
+ * slot.
+ *
+ * Each entry describes one SDL storage texture slot counted by the shader or
+ * compute-pipeline create-info storage texture count for that resource group.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_GPUShaderResourceLayout
+ * \sa SDL_GPUComputePipelineResourceLayout
+ */
+typedef struct SDL_GPUStorageTextureSlotDescription
+{
+    SDL_GPUTextureType texture_type;        /**< The texture type used by the storage texture binding. */
+    SDL_GPUTextureFormat format;            /**< The texture format used by the storage texture binding. */
+    SDL_GPUStorageTextureAccess access;     /**< The storage access used by the storage texture binding. */
+} SDL_GPUStorageTextureSlotDescription;
+
+/**
+ * A structure specifying shader resource layout facts.
+ *
+ * The resource counts should match the SDL_GPUShaderCreateInfo counts that
+ * would be used for shader creation. The num_storage_textures and
+ * num_storage_buffers fields are read-only graphics storage counts.
+ *
+ * Optional layout arrays describe facts that are not represented by the
+ * resource counts. If an array is NULL, SDL uses the default layout for the
+ * corresponding resource class. If an array is non-NULL, it must contain one
+ * entry for every slot counted by the matching resource count field. The
+ * caller-owned layout and arrays only need to remain valid and unmodified
+ * until SDL_CreateGPUShaderWithResourceLayout() returns.
+ *
+ * Defaults are 2D filterable-float sampled textures with filtering samplers
+ * and 2D SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM read-only storage textures.
+ *
+ * These layout facts can describe sampled texture type, sample type, sampler
+ * type, and storage texture format, type, and access. Unsupported
+ * combinations are rejected by shader creation. Applications can use
+ * SDL_GPUTextureSupportsFormat() and SDL_GPUTextureSupportsSampleCount() for
+ * preflight, but texture creation and shader creation remain authoritative.
+ *
+ * Non-filtering sampler layout facts require an all-nearest non-comparison
+ * sampler object when bound. Samplerless layout facts require binding the
+ * texture with a NULL sampler.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_CreateGPUShaderWithResourceLayout
+ */
+typedef struct SDL_GPUShaderResourceLayout
+{
+    SDL_GPUShaderStage stage; /**< The shader stage this layout applies to. */
+    Uint32 num_samplers; /**< The number of sampler/sampled-texture slots defined in the shader. */
+    Uint32 num_storage_textures; /**< The number of read-only storage textures defined in the shader. */
+    Uint32 num_storage_buffers; /**< The number of read-only storage buffers defined in the shader. */
+    Uint32 num_uniform_buffers; /**< The number of uniform buffers defined in the shader. */
+    const SDL_GPUSampledTextureSlotDescription *sampled_texture_slots; /**< Optional layout facts for sampler/sampled-texture slots; NULL requests defaults for all sampled texture slots. */
+    const SDL_GPUStorageTextureSlotDescription *storage_texture_slots; /**< Optional layout facts for read-only storage texture slots; NULL requests defaults for all storage texture slots. */
+} SDL_GPUShaderResourceLayout;
+
+/**
+ * A structure specifying compute pipeline resource layout facts.
+ *
+ * The resource counts should match the SDL_GPUComputePipelineCreateInfo counts
+ * that would be used for compute pipeline creation.
+ *
+ * Optional layout arrays describe facts that are not represented by the
+ * resource counts. If an array is NULL, SDL uses the default layout for the
+ * corresponding resource class. If an array is non-NULL, it must contain one
+ * entry for every slot counted by the matching resource count field. The
+ * caller-owned layout and arrays only need to remain valid and unmodified
+ * until SDL_CreateGPUComputePipelineWithResourceLayout() returns.
+ *
+ * Defaults are 2D filterable-float sampled textures with filtering samplers,
+ * 2D SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM read-only storage textures for
+ * read-only storage texture slots, and 2D
+ * SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM write-only storage textures for
+ * read-write storage texture slots.
+ *
+ * These layout facts can describe sampled texture type, sample type, sampler
+ * type, and storage texture format, type, and access. Unsupported
+ * combinations are rejected by compute pipeline creation. Applications can use
+ * SDL_GPUTextureSupportsFormat() and SDL_GPUTextureSupportsSampleCount() for
+ * preflight, but texture creation and compute pipeline creation remain
+ * authoritative.
+ *
+ * Non-filtering sampler layout facts require an all-nearest non-comparison
+ * sampler object when bound. Samplerless layout facts require binding the
+ * texture with a NULL sampler.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_CreateGPUComputePipelineWithResourceLayout
+ */
+typedef struct SDL_GPUComputePipelineResourceLayout
+{
+    Uint32 num_samplers; /**< The number of sampler/sampled-texture slots defined in the compute pipeline. */
+    Uint32 num_readonly_storage_textures; /**< The number of read-only storage textures defined in the compute pipeline. */
+    Uint32 num_readonly_storage_buffers; /**< The number of read-only storage buffers defined in the compute pipeline. */
+    Uint32 num_readwrite_storage_textures; /**< The number of read-write storage textures defined in the compute pipeline. */
+    Uint32 num_readwrite_storage_buffers; /**< The number of read-write storage buffers defined in the compute pipeline. */
+    Uint32 num_uniform_buffers; /**< The number of uniform buffers defined in the compute pipeline. */
+    const SDL_GPUSampledTextureSlotDescription *sampled_texture_slots; /**< Optional layout facts for sampler/sampled-texture slots; NULL requests defaults for all sampled texture slots. */
+    const SDL_GPUStorageTextureSlotDescription *readonly_storage_texture_slots; /**< Optional layout facts for read-only storage texture slots; NULL requests defaults for all read-only storage texture slots. */
+    const SDL_GPUStorageTextureSlotDescription *readwrite_storage_texture_slots; /**< Optional layout facts for read-write storage texture slots; NULL requests defaults for all read-write storage texture slots. */
+} SDL_GPUComputePipelineResourceLayout;
+
+/**
+ * A structure specifying code and resource counts for creating a shader object.
  *
  * \since This struct is available since SDL 3.2.0.
  *
@@ -1751,6 +1958,36 @@ typedef struct SDL_GPUShaderCreateInfo
 
     SDL_PropertiesID props;       /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
 } SDL_GPUShaderCreateInfo;
+
+/**
+ * A structure specifying code and a resource layout for creating a shader
+ * object.
+ *
+ * The `resource_layout` field supplies the shader resource counts, stage, and
+ * optional per-slot layout facts. SDL validates and copies the caller-owned
+ * layout during SDL_CreateGPUShaderWithResourceLayout(), so it only needs to
+ * remain valid and unmodified until that function returns.
+ *
+ * There are optional properties that can be provided through `props`. These
+ * are the supported properties:
+ *
+ * - `SDL_PROP_GPU_SHADER_CREATE_NAME_STRING`: a name that can be displayed in
+ *   debugging tools.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_CreateGPUShaderWithResourceLayout
+ * \sa SDL_GPUShaderResourceLayout
+ */
+typedef struct SDL_GPUShaderWithResourceLayoutCreateInfo
+{
+    size_t code_size; /**< The size in bytes of the code pointed to. */
+    const Uint8 *code; /**< A pointer to shader code. */
+    const char *entrypoint; /**< A pointer to a null-terminated UTF-8 string specifying the entry point function name for the shader. */
+    SDL_GPUShaderFormat format; /**< The format of the shader code. */
+    const SDL_GPUShaderResourceLayout *resource_layout; /**< The shader resource layout facts to use for this shader. */
+    SDL_PropertiesID props; /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
+} SDL_GPUShaderWithResourceLayoutCreateInfo;
 
 /**
  * A structure specifying the parameters of a texture.
@@ -1776,7 +2013,7 @@ typedef struct SDL_GPUTextureCreateInfo
     Uint32 height;                    /**< The height of the texture. */
     Uint32 layer_count_or_depth;      /**< The layer count or depth of the texture. This value is treated as a layer count on 2D array textures, and as a depth value on 3D textures. */
     Uint32 num_levels;                /**< The number of mip levels in the texture. */
-    SDL_GPUSampleCount sample_count;  /**< The number of samples per texel. Only applies if the texture is used as a render target. */
+    SDL_GPUSampleCount sample_count;  /**< The number of samples per texel. Multisample textures are only supported for valid render-target or multisample sampled usage combinations. */
 
     SDL_PropertiesID props;           /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
 } SDL_GPUTextureCreateInfo;
@@ -1824,6 +2061,8 @@ typedef struct SDL_GPUTransferBufferCreateInfo
  *
  * Note that SDL_GPU_FILLMODE_LINE is not supported on many Android devices.
  * For those devices, the fill mode will automatically fall back to FILL.
+ * The WebGPU backend rejects SDL_GPU_FILLMODE_LINE because WebGPU does not
+ * expose polygon line fill mode.
  *
  * Also note that the D3D12 driver will enable depth clamping even if
  * enable_depth_clip is true. If you need this clamp+clip behavior, consider
@@ -1981,6 +2220,39 @@ typedef struct SDL_GPUComputePipelineCreateInfo
 } SDL_GPUComputePipelineCreateInfo;
 
 /**
+ * A structure specifying code and a resource layout for creating a compute
+ * pipeline object.
+ *
+ * The `resource_layout` field supplies the compute pipeline resource counts
+ * and optional per-slot layout facts. SDL validates and copies the caller-owned
+ * layout during SDL_CreateGPUComputePipelineWithResourceLayout(), so it only
+ * needs to remain valid and unmodified until that function returns.
+ *
+ * There are optional properties that can be provided through `props`. These
+ * are the supported properties:
+ *
+ * - `SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING`: a name that can be
+ *   displayed in debugging tools.
+ *
+ * \since This struct is available since SDL 3.6.0.
+ *
+ * \sa SDL_CreateGPUComputePipelineWithResourceLayout
+ * \sa SDL_GPUComputePipelineResourceLayout
+ */
+typedef struct SDL_GPUComputePipelineWithResourceLayoutCreateInfo
+{
+    size_t code_size; /**< The size in bytes of the compute shader code pointed to. */
+    const Uint8 *code; /**< A pointer to compute shader code. */
+    const char *entrypoint; /**< A pointer to a null-terminated UTF-8 string specifying the entry point function name for the shader. */
+    SDL_GPUShaderFormat format; /**< The format of the compute shader code. */
+    const SDL_GPUComputePipelineResourceLayout *resource_layout; /**< The compute pipeline resource layout facts to use for this pipeline. */
+    Uint32 threadcount_x; /**< The number of threads in the X dimension. This should match the value in the shader. */
+    Uint32 threadcount_y; /**< The number of threads in the Y dimension. This should match the value in the shader. */
+    Uint32 threadcount_z; /**< The number of threads in the Z dimension. This should match the value in the shader. */
+    SDL_PropertiesID props; /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
+} SDL_GPUComputePipelineWithResourceLayoutCreateInfo;
+
+/**
  * A structure specifying the parameters of a color target used by a render
  * pass.
  *
@@ -2011,6 +2283,10 @@ typedef struct SDL_GPUComputePipelineCreateInfo
  *   stores the multisample texture's contents. Not recommended as it requires
  *   significant memory bandwidth.
  *
+ * For 3D resolve textures, resolve_layer selects the destination depth plane.
+ * Some backends may implement this with a 2D resolve plus copy, so
+ * performance can differ from ordinary 2D or array-layer resolves.
+ *
  * \since This struct is available since SDL 3.2.0.
  *
  * \sa SDL_BeginGPURenderPass
@@ -2026,7 +2302,7 @@ typedef struct SDL_GPUColorTargetInfo
     SDL_GPUStoreOp store_op;         /**< What is done with the results of the render pass. */
     SDL_GPUTexture *resolve_texture; /**< The texture that will receive the results of a multisample resolve operation. Ignored if a RESOLVE* store_op is not used. */
     Uint32 resolve_mip_level;        /**< The mip level of the resolve texture to use for the resolve operation. Ignored if a RESOLVE* store_op is not used. */
-    Uint32 resolve_layer;            /**< The layer index of the resolve texture to use for the resolve operation. Ignored if a RESOLVE* store_op is not used. */
+    Uint32 resolve_layer;            /**< The layer index or depth plane of the resolve texture to use for the resolve operation. This value is treated as a layer index on 2D array and cube textures, and as a depth plane on 3D textures. Ignored if a RESOLVE* store_op is not used. */
     bool cycle;                      /**< true cycles the texture if the texture is bound and load_op is not LOAD */
     bool cycle_resolve_texture;      /**< true cycles the resolve texture if the resolve texture is bound. Ignored if a RESOLVE* store_op is not used. */
     Uint8 padding1;
@@ -2091,7 +2367,7 @@ typedef struct SDL_GPUDepthStencilTargetInfo
     bool cycle;                            /**< true cycles the texture if the texture is bound and any load ops are not LOAD */
     Uint8 clear_stencil;                   /**< The value to clear the stencil component to at the beginning of the render pass. Ignored if SDL_GPU_LOADOP_CLEAR is not used. */
     Uint8 mip_level;                       /**< The mip level to use as the depth stencil target. */
-    Uint8 layer;                           /**< The layer index to use as the depth stencil target. */
+    Uint8 layer;                           /**< The layer index to use as the depth stencil target. For 2D array, cube, and cube-array depth-stencil textures, this selects the array layer or cube face. */
 } SDL_GPUDepthStencilTargetInfo;
 
 /**
@@ -2143,7 +2419,7 @@ typedef struct SDL_GPUBufferBinding
 typedef struct SDL_GPUTextureSamplerBinding
 {
     SDL_GPUTexture *texture;  /**< The texture to bind. Must have been created with SDL_GPU_TEXTUREUSAGE_SAMPLER. */
-    SDL_GPUSampler *sampler;  /**< The sampler to bind. */
+    SDL_GPUSampler *sampler;  /**< The sampler to bind. Must be NULL only for layout-declared SDL_GPU_SHADERSAMPLERTYPE_NONE slots. */
 } SDL_GPUTextureSamplerBinding;
 
 /**
@@ -2175,7 +2451,7 @@ typedef struct SDL_GPUStorageTextureReadWriteBinding
 {
     SDL_GPUTexture *texture;  /**< The texture to bind. Must have been created with SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE or SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE. */
     Uint32 mip_level;         /**< The mip level index to bind. */
-    Uint32 layer;             /**< The layer index to bind. */
+    Uint32 layer;             /**< The layer index to bind. For 2D-array textures this binds one selected layer as a 2D storage texture. For 3D storage textures this must be 0; the whole selected mip level is bound. */
     bool cycle;               /**< true cycles the texture if it is already bound. */
     Uint8 padding1;
     Uint8 padding2;
@@ -2224,6 +2500,7 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GPUSupportsProperties(
  * - "vulkan": [Vulkan](CategoryGPU#vulkan)
  * - "direct3d12": [D3D12](CategoryGPU#d3d12)
  * - "metal": [Metal](CategoryGPU#metal)
+ * - "webgpu": [WebGPU](CategoryGPU#webgpu)
  * - NULL: let SDL pick the optimal driver
  *
  * \param format_flags a bitflag indicating which shader formats the app is
@@ -2261,21 +2538,23 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  * - `SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING`: the name of the GPU driver to
  *   use, if a specific one is desired.
  * - `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_CLIP_DISTANCE_BOOLEAN`: Enable Vulkan
- *   device feature shaderClipDistance. If disabled, clip distances are not
- *   supported in shader code: gl_ClipDistance[] built-ins of GLSL,
- *   SV_ClipDistance0/1 semantics of HLSL and [[clip_distance]] attribute of
- *   Metal. Disabling optional features allows the application to run on some
- *   older Android devices. Defaults to true.
+ *   device feature shaderClipDistance or the WebGPU clip-distances feature
+ *   when supported. If disabled, clip distances are not supported in shader
+ *   code: gl_ClipDistance[] built-ins of GLSL, SV_ClipDistance0/1 semantics
+ *   of HLSL and [[clip_distance]] attribute of Metal. Vulkan defaults to
+ *   true; WebGPU requests this feature only when this property is true.
  * - `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN`: Enable
- *   Vulkan device feature depthClamp. If disabled, there is no depth clamp
- *   support and enable_depth_clip in SDL_GPURasterizerState must always be
- *   set to true. Disabling optional features allows the application to run on
- *   some older Android devices. Defaults to true.
+ *   Vulkan device feature depthClamp or the WebGPU depth-clip-control feature
+ *   when supported. If disabled, there is no depth clamp support and
+ *   enable_depth_clip in SDL_GPURasterizerState must always be set to true.
+ *   Disabling optional features allows the application to run on some older
+ *   devices. Defaults to true.
  * - `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_INDIRECT_DRAW_FIRST_INSTANCE_BOOLEAN`:
- *   Enable Vulkan device feature drawIndirectFirstInstance. If disabled, the
- *   argument first_instance of SDL_GPUIndirectDrawCommand must be set to
- *   zero. Disabling optional features allows the application to run on some
- *   older Android devices. Defaults to true.
+ *   Enable Vulkan device feature drawIndirectFirstInstance or the WebGPU
+ *   indirect-first-instance feature when supported. If disabled, the argument
+ *   first_instance of SDL_GPUIndirectDrawCommand must be set to zero.
+ *   Disabling optional features allows the application to run on some older
+ *   devices. Defaults to true.
  * - `SDL_PROP_GPU_DEVICE_CREATE_FEATURE_ANISOTROPY_BOOLEAN`: Enable Vulkan
  *   device feature samplerAnisotropy. If disabled, enable_anisotropy of
  *   SDL_GPUSamplerCreateInfo must be set to false. Disabling optional
@@ -2296,6 +2575,10 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  *   provide MSL shaders if applicable.
  * - `SDL_PROP_GPU_DEVICE_CREATE_SHADERS_METALLIB_BOOLEAN`: The app is able to
  *   provide Metal shader libraries if applicable.
+ * - `SDL_PROP_GPU_DEVICE_CREATE_SHADERS_WGSL_BOOLEAN`: The app is able to
+ *   provide WGSL shaders for the WebGPU backend if applicable. Shaders must
+ *   follow SDL's documented WebGPU binding convention and supported resource
+ *   subset.
  *
  * With the D3D12 backend:
  *
@@ -2330,9 +2613,9 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDevice(
  * - `SDL_PROP_GPU_DEVICE_CREATE_VULKAN_REQUIRE_HARDWARE_ACCELERATION_BOOLEAN`:
  *   By default, Vulkan device enumeration includes drivers of all types,
  *   including software renderers (for example, the Lavapipe Mesa driver).
- *   This can be useful if your application _requires_ SDL_GPU, but if you can
- *   provide your own fallback renderer (for example, an OpenGL renderer) this
- *   property can be set to true. Defaults to false.
+ *   This can be useful if your application _requires_ the GPU API, but if you
+ *   can provide your own fallback renderer (for example, an OpenGL renderer)
+ *   this property can be set to true. Defaults to false.
  * - `SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER`: a pointer to an
  *   SDL_GPUVulkanOptions structure to be processed during device creation.
  *   This allows configuring a variety of Vulkan-specific options such as
@@ -2376,6 +2659,7 @@ extern SDL_DECLSPEC SDL_GPUDevice * SDLCALL SDL_CreateGPUDeviceWithProperties(
 #define SDL_PROP_GPU_DEVICE_CREATE_SHADERS_DXIL_BOOLEAN                         "SDL.gpu.device.create.shaders.dxil"
 #define SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN                          "SDL.gpu.device.create.shaders.msl"
 #define SDL_PROP_GPU_DEVICE_CREATE_SHADERS_METALLIB_BOOLEAN                     "SDL.gpu.device.create.shaders.metallib"
+#define SDL_PROP_GPU_DEVICE_CREATE_SHADERS_WGSL_BOOLEAN                         "SDL.gpu.device.create.shaders.wgsl"
 #define SDL_PROP_GPU_DEVICE_CREATE_D3D12_ALLOW_FEWER_RESOURCE_SLOTS_BOOLEAN     "SDL.gpu.device.create.d3d12.allowtier1resourcebinding"
 #define SDL_PROP_GPU_DEVICE_CREATE_D3D12_SEMANTIC_NAME_STRING                   "SDL.gpu.device.create.d3d12.semantic"
 #define SDL_PROP_GPU_DEVICE_CREATE_D3D12_AGILITY_SDK_VERSION_NUMBER             "SDL.gpu.device.create.d3d12.agility_sdk_version"
@@ -2630,11 +2914,59 @@ extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetGPUDeviceProperties(SDL_GPUD
  * - [[texture]]: Sampled textures, followed by read-only storage textures,
  *   followed by read-write storage textures
  *
+ * For WGSL with the WebGPU backend, shaders must follow SDL's default WebGPU
+ * binding convention and supported resource subset. Use the following resource
+ * groups:
+ *
+ * - Group 0: Sampled texture/sampler pairs first, followed by read-only
+ *   storage textures, followed by read-only storage buffers. Sampled texture
+ *   slot N uses bindings 2*N and 2*N+1. Read-only storage texture slot N uses
+ *   binding num_samplers*2+N. Read-only storage buffer slot N uses binding
+ *   num_samplers*2+num_readonly_storage_textures+N.
+ * - Group 1: Read-write storage textures, followed by read-write storage
+ *   buffers. Storage texture slot N uses binding N; read-write storage buffer
+ *   slot N uses binding num_readwrite_storage_textures+N. Storage texture
+ *   slots use write-only layout access by default; explicit layout facts can
+ *   declare write-only or read-write access for supported formats.
+ * - Group 2: Uniform buffers at binding N.
+ *
+ * With the default resource layout, WebGPU compute storage textures are
+ * `texture_storage_2d<rgba8unorm, read>` resources created with
+ * `SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ` alone and
+ * `texture_storage_2d<rgba8unorm, write>` resources created with
+ * `SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE` alone. An
+ * SDL_GPUComputePipelineResourceLayout can declare read-only 2D, 2D-array,
+ * and 3D `rgba8unorm`, `rgba8snorm`,
+ * `rgba16float`, `rg32float`, `rgba32float`, `rgba8uint`, `rgba16uint`,
+ * `r32uint`, `rgba8sint`, `rgba16sint`, `r32sint`, or `r32float` storage
+ * texture slots.
+ * Read-write storage texture layout facts can declare shader-visible 2D or
+ * 3D storage texture slots with write-only access for the same
+ * format set, and read-write access for the same format set except
+ * `rgba8snorm` and `rg32float`. Selected mip/layer backing
+ * subresources are controlled by SDL_GPUStorageTextureReadWriteBinding and
+ * backend format support; 2D-array write bindings select one layer as a 2D
+ * storage texture, while 3D read-write storage texture bindings select a
+ * whole mip level and must use layer 0.
+ * WGSL shaders using read-only or read-write
+ * storage texture access must declare
+ * `requires readonly_and_readwrite_storage_textures;`. Resource layout facts
+ * can also declare selected non-default sampled texture and sampler layout
+ * while preserving SDL's group/binding ordering.
+ *
+ * For native shader formats, SDL_CreateGPUComputePipeline() uses the resource
+ * counts and shader bytecode semantics. Per-slot sampled texture and sampler
+ * facts are enforced when supplied through
+ * SDL_CreateGPUComputePipelineWithResourceLayout().
+ *
  * There are optional properties that can be provided through `props`. These
  * are the supported properties:
  *
  * - `SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING`: a name that can be
  *   displayed in debugging tools.
+ *
+ * Non-default resource layout facts are supplied through
+ * SDL_CreateGPUComputePipelineWithResourceLayout().
  *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the compute pipeline to
@@ -2652,6 +2984,35 @@ extern SDL_DECLSPEC SDL_GPUComputePipeline * SDLCALL SDL_CreateGPUComputePipelin
     const SDL_GPUComputePipelineCreateInfo *createinfo);
 
 #define SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING "SDL.gpu.computepipeline.create.name"
+
+/**
+ * Creates a pipeline object to be used in a compute workflow using resource
+ * layout facts.
+ *
+ * The resource layout supplies the compute pipeline resource counts and
+ * optional per-slot layout facts.
+ *
+ * There are optional properties that can be provided through `props`. These
+ * are the supported properties:
+ *
+ * - `SDL_PROP_GPU_COMPUTEPIPELINE_CREATE_NAME_STRING`: a name that can be
+ *   displayed in debugging tools.
+ *
+ * \param device a GPU Context.
+ * \param createinfo a struct describing the state of the compute pipeline to
+ *                   create.
+ * \returns a compute pipeline object on success, or NULL on failure; call
+ *          SDL_GetError() for more information.
+ *
+ * \since This function is available since SDL 3.6.0.
+ *
+ * \sa SDL_BindGPUComputePipeline
+ * \sa SDL_CreateGPUComputePipeline
+ * \sa SDL_ReleaseGPUComputePipeline
+ */
+extern SDL_DECLSPEC SDL_GPUComputePipeline * SDLCALL SDL_CreateGPUComputePipelineWithResourceLayout(
+    SDL_GPUDevice *device,
+    const SDL_GPUComputePipelineWithResourceLayoutCreateInfo *createinfo);
 
 /**
  * Creates a pipeline object to be used in a graphics workflow.
@@ -2755,6 +3116,53 @@ extern SDL_DECLSPEC SDL_GPUSampler * SDLCALL SDL_CreateGPUSampler(
  *   [[stage_in]] attribute which will automatically use the vertex input
  *   information from the SDL_GPUGraphicsPipeline.
  *
+ * For WGSL with the WebGPU backend, shaders must follow SDL's WebGPU binding
+ * convention. Without a shader resource layout carrying explicit layout
+ * facts, shaders must use the default
+ * supported resource subset. An SDL_GPUShaderResourceLayout supplied to shader
+ * creation can declare selected non-default sampled texture, sampler, and
+ * storage texture layout while preserving the same resource groups:
+ *
+ * For vertex shaders:
+ *
+ * - Group 0: Sampled texture/sampler pairs, followed by read-only storage
+ *   textures, followed by read-only storage buffers. Sampler slot N uses
+ *   texture binding 2*N and sampler binding 2*N+1. Storage texture slot N
+ *   uses binding 2*num_samplers+N. Storage buffer slot N uses binding
+ *   2*num_samplers+num_storage_textures+N.
+ * - Group 1: Uniform buffers at binding N.
+ *
+ * For fragment shaders:
+ *
+ * - Group 2: Sampled texture/sampler pairs, followed by read-only storage
+ *   textures, followed by read-only storage buffers.
+ *   Sampler slot N uses texture binding 2*N and sampler binding 2*N+1.
+ *   Read-only storage texture slot N uses binding 2*num_samplers+N.
+ *   Read-only storage buffer slot N uses binding
+ *   2*num_samplers+num_storage_textures+N.
+ * - Group 3: Uniform buffers at binding N.
+ *
+ * With the default resource layout, WebGPU graphics storage textures are
+ * read-only `texture_storage_2d<rgba8unorm, read>` resources created with
+ * `SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM`. SDL_GPUShaderResourceLayout can
+ * declare read-only 2D, 2D-array, and 3D `rgba8unorm`, `r32uint`, `r32sint`,
+ * or `r32float` storage texture slots. WGSL shaders using graphics storage
+ * textures must declare
+ * `requires readonly_and_readwrite_storage_textures;`.
+ * Textures may be created with `SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ`
+ * alone, or with `SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ |
+ * SDL_GPU_TEXTUREUSAGE_COLOR_TARGET` for render-then-storage-read workflows
+ * across separate render passes. This combination does not permit binding the
+ * same texture as both a render attachment and a storage texture in the same
+ * render pass.
+ *
+ * Compute pipeline resource ordering for the WebGPU backend is
+ * documented in SDL_CreateGPUComputePipeline().
+ *
+ * For native shader formats, SDL_CreateGPUShader() uses the resource counts
+ * and shader bytecode semantics. Per-slot sampled texture and sampler facts
+ * are enforced when supplied through SDL_CreateGPUShaderWithResourceLayout().
+ *
  * Shader semantics other than system-value semantics do not matter in D3D12
  * and for ease of use the SDL implementation assumes that non system-value
  * semantics will all be TEXCOORD. If you are using HLSL as the shader source
@@ -2769,6 +3177,9 @@ extern SDL_DECLSPEC SDL_GPUSampler * SDLCALL SDL_CreateGPUSampler(
  *
  * - `SDL_PROP_GPU_SHADER_CREATE_NAME_STRING`: a name that can be displayed in
  *   debugging tools.
+ *
+ * Non-default resource layout facts are supplied through
+ * SDL_CreateGPUShaderWithResourceLayout().
  *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the shader to create.
@@ -2787,6 +3198,34 @@ extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShader(
 #define SDL_PROP_GPU_SHADER_CREATE_NAME_STRING "SDL.gpu.shader.create.name"
 
 /**
+ * Creates a shader to be used when creating a graphics pipeline using
+ * resource layout facts.
+ *
+ * The resource layout supplies the shader stage, resource counts, and
+ * optional per-slot layout facts.
+ *
+ * There are optional properties that can be provided through `props`. These
+ * are the supported properties:
+ *
+ * - `SDL_PROP_GPU_SHADER_CREATE_NAME_STRING`: a name that can be displayed in
+ *   debugging tools.
+ *
+ * \param device a GPU Context.
+ * \param createinfo a struct describing the state of the shader to create.
+ * \returns a shader object on success, or NULL on failure; call
+ *          SDL_GetError() for more information.
+ *
+ * \since This function is available since SDL 3.6.0.
+ *
+ * \sa SDL_CreateGPUGraphicsPipeline
+ * \sa SDL_CreateGPUShader
+ * \sa SDL_ReleaseGPUShader
+ */
+extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShaderWithResourceLayout(
+    SDL_GPUDevice *device,
+    const SDL_GPUShaderWithResourceLayoutCreateInfo *createinfo);
+
+/**
  * Creates a texture object to be used in graphics or compute workflows.
  *
  * The contents of this texture are undefined until data is written to the
@@ -2795,10 +3234,13 @@ extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShader(
  *
  * Note that certain combinations of usage flags are invalid. For example, a
  * texture cannot have both the SAMPLER and GRAPHICS_STORAGE_READ flags.
+ * Depth/stencil formats and multisample sampled textures can also have
+ * narrower supported type, usage, and sample-count combinations.
  *
- * If you request a sample count higher than the hardware supports, the
- * implementation will automatically fall back to the highest available sample
- * count.
+ * If you need a multisample count, use
+ * SDL_GPUTextureSupportsSampleCount() to check whether the texture format
+ * supports it. Unsupported sample counts or incompatible usage combinations
+ * can make texture creation fail.
  *
  * There are optional properties that can be provided through
  * SDL_GPUTextureCreateInfo's `props`. These are the supported properties:
@@ -3301,7 +3743,8 @@ extern SDL_DECLSPEC void SDLCALL SDL_PushGPUComputeUniformData(
  * \param depth_stencil_target_info a texture subresource with corresponding
  *                                  clear value and load/store ops, may be
  *                                  NULL.
- * \returns a render pass handle.
+ * \returns a render pass handle, or NULL on failure; call SDL_GetError() for
+ *          more information.
  *
  * \since This function is available since SDL 3.2.0.
  *
@@ -3413,19 +3856,20 @@ extern SDL_DECLSPEC void SDLCALL SDL_BindGPUIndexBuffer(
     SDL_GPUIndexElementSize index_element_size);
 
 /**
- * Binds texture-sampler pairs for use on the vertex shader.
+ * Binds sampled textures, and their paired samplers when required, for use on
+ * the vertex shader.
  *
  * The textures must have been created with SDL_GPU_TEXTUREUSAGE_SAMPLER.
+ * Samplers must be non-NULL unless the shader resource layout declares the
+ * slot with SDL_GPU_SHADERSAMPLERTYPE_NONE.
  *
  * Be sure your shader is set up according to the requirements documented in
  * SDL_CreateGPUShader().
  *
  * \param render_pass a render pass handle.
  * \param first_slot the vertex sampler slot to begin binding from.
- * \param texture_sampler_bindings an array of texture-sampler binding
- *                                 structs.
- * \param num_bindings the number of texture-sampler pairs to bind from the
- *                     array.
+ * \param texture_sampler_bindings an array of texture/sampler binding structs.
+ * \param num_bindings the number of bindings to bind from the array.
  *
  * \since This function is available since SDL 3.2.0.
  *
@@ -3486,19 +3930,20 @@ extern SDL_DECLSPEC void SDLCALL SDL_BindGPUVertexStorageBuffers(
     Uint32 num_bindings);
 
 /**
- * Binds texture-sampler pairs for use on the fragment shader.
+ * Binds sampled textures, and their paired samplers when required, for use on
+ * the fragment shader.
  *
  * The textures must have been created with SDL_GPU_TEXTUREUSAGE_SAMPLER.
+ * Samplers must be non-NULL unless the shader resource layout declares the
+ * slot with SDL_GPU_SHADERSAMPLERTYPE_NONE.
  *
  * Be sure your shader is set up according to the requirements documented in
  * SDL_CreateGPUShader().
  *
  * \param render_pass a render pass handle.
  * \param first_slot the fragment sampler slot to begin binding from.
- * \param texture_sampler_bindings an array of texture-sampler binding
- *                                 structs.
- * \param num_bindings the number of texture-sampler pairs to bind from the
- *                     array.
+ * \param texture_sampler_bindings an array of texture/sampler binding structs.
+ * \param num_bindings the number of bindings to bind from the array.
  *
  * \since This function is available since SDL 3.2.0.
  *
@@ -3734,19 +4179,20 @@ extern SDL_DECLSPEC void SDLCALL SDL_BindGPUComputePipeline(
     SDL_GPUComputePipeline *compute_pipeline);
 
 /**
- * Binds texture-sampler pairs for use on the compute shader.
+ * Binds sampled textures, and their paired samplers when required, for use on
+ * the compute shader.
  *
  * The textures must have been created with SDL_GPU_TEXTUREUSAGE_SAMPLER.
+ * Samplers must be non-NULL unless the compute pipeline resource layout
+ * declares the slot with SDL_GPU_SHADERSAMPLERTYPE_NONE.
  *
  * Be sure your shader is set up according to the requirements documented in
  * SDL_CreateGPUComputePipeline().
  *
  * \param compute_pass a compute pass handle.
  * \param first_slot the compute sampler slot to begin binding from.
- * \param texture_sampler_bindings an array of texture-sampler binding
- *                                 structs.
- * \param num_bindings the number of texture-sampler bindings to bind from the
- *                     array.
+ * \param texture_sampler_bindings an array of texture/sampler binding structs.
+ * \param num_bindings the number of bindings to bind from the array.
  *
  * \since This function is available since SDL 3.2.0.
  *
@@ -3929,6 +4375,10 @@ extern SDL_DECLSPEC SDL_GPUCopyPass * SDLCALL SDL_BeginGPUCopyPass(
  *
  * You must align the data in the transfer buffer to a multiple of the texel
  * size of the texture format.
+ * For compressed texture formats, `destination->x` and `destination->y` must
+ * be aligned to the format's block width and height. `destination->w` and
+ * `destination->h` must be multiples of the block width and height unless the
+ * region reaches the edge of the selected mip level.
  *
  * \param copy_pass a copy pass handle.
  * \param source the source transfer buffer with image layout information.
@@ -3973,6 +4423,12 @@ extern SDL_DECLSPEC void SDLCALL SDL_UploadToGPUBuffer(
  * This function does not support copying between depth and color textures.
  * For those, copy the texture to a buffer and then to the destination
  * texture.
+ *
+ * For compressed texture formats, `source->x`, `source->y`,
+ * `destination->x`, and `destination->y` must be aligned to the format block
+ * width and height. `w` and `h` must be multiples of the block width and
+ * height unless the region reaches the edge of the selected source and
+ * destination mip levels.
  *
  * \param copy_pass a copy pass handle.
  * \param source a source texture region.
@@ -4021,6 +4477,11 @@ extern SDL_DECLSPEC void SDLCALL SDL_CopyGPUBufferToBuffer(
  *
  * This data is not guaranteed to be copied until the command buffer fence is
  * signaled.
+ *
+ * For compressed texture formats, `source->x` and `source->y` must be aligned
+ * to the format's block width and height. `source->w` and `source->h` must be
+ * multiples of the block width and height unless the region reaches the edge
+ * of the selected mip level.
  *
  * \param copy_pass a copy pass handle.
  * \param source the source texture region.
@@ -4540,6 +5001,19 @@ extern SDL_DECLSPEC Uint32 SDLCALL SDL_GPUTextureFormatTexelBlockSize(
  * Determines whether a texture format is supported for a given type and
  * usage.
  *
+ * This is a texture creation and usage capability query. A true result for
+ * SDL_GPU_TEXTUREUSAGE_SAMPLER means the texture can be created for sampled
+ * texture usage, but some shader layouts may still require explicit shader
+ * resource layout facts and compatible sampler state. Signed and unsigned
+ * integer sampled textures require explicit SINT/UINT samplerless layout facts
+ * and must be bound with a NULL sampler; paired sampler layouts are rejected.
+ * Depth/stencil formats may support only a narrow subset of type, usage, and
+ * sample-count combinations.
+ *
+ * This function is not an exact preflight for shader resource layouts,
+ * resource bindings, graphics or compute pipelines, or runtime object state;
+ * final creation remains authoritative.
+ *
  * \param device a GPU context.
  * \param format the texture format to check.
  * \param type the type of texture (2D, 3D, Cube).
@@ -4555,7 +5029,13 @@ extern SDL_DECLSPEC bool SDLCALL SDL_GPUTextureSupportsFormat(
     SDL_GPUTextureUsageFlags usage);
 
 /**
- * Determines if a sample count for a texture format is supported.
+ * Determines if a render-target sample count for a texture format is
+ * supported.
+ *
+ * This is a coarse texture allocation query for render-target sample counts,
+ * not an exact preflight for shader resource layouts, pipelines, or runtime
+ * object state. Multisample sampled textures are supported only for specific
+ * valid usage combinations. Final creation remains authoritative.
  *
  * \param device a GPU context.
  * \param format the texture format to check.

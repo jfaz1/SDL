@@ -272,6 +272,20 @@ emmake make -j4
 To build the tests, add `-DSDL_TESTS=ON` to the `emcmake cmake` command line.
 To build the examples, add `-DSDL_EXAMPLES=ON` to the `emcmake cmake` command line.
 
+To build SDL_GPU with the WebGPU backend, SDL currently needs to be built as
+a static library:
+
+```bash
+emcmake cmake -DSDL_GPU=ON -DSDL_GPU_WEBGPU=ON -DSDL_STATIC=ON -DSDL_SHARED=OFF ..
+```
+
+This gives SDL's generated static target the required Emdawn and Asyncify link
+options. The WebGPU backend uses WGSL shaders with
+`SDL_GPU_SHADERFORMAT_WGSL` and requires browser WebGPU support. If you do not
+use SDL's generated CMake target when linking your app, pass
+`--use-port=emdawnwebgpu:cpp_bindings=false` and `-sASYNCIFY=1` to the final
+Emscripten link command.
+
 
 ## Building your app
 

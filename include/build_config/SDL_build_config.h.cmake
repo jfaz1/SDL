@@ -496,6 +496,7 @@
 #cmakedefine SDL_GPU_D3D12 1
 #cmakedefine SDL_GPU_VULKAN 1
 #cmakedefine SDL_GPU_METAL 1
+#cmakedefine HAVE_GPU_WEBGPU 1
 #cmakedefine HAVE_GPU_OPENXR 1
 
 #cmakedefine SDL_GPU_PRIVATE 1

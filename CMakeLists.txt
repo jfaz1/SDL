@@ -406,6 +406,7 @@ set_option(SDL_ASAN                "Use AddressSanitizer to detect memory errors
 set_option(SDL_CCACHE              "Use Ccache to speed up build" OFF)
 set_option(SDL_CLANG_TIDY          "Run clang-tidy static analysis" OFF)
 dep_option(SDL_GPU_OPENXR          "Build SDL_GPU with OpenXR support" ON "SDL_GPU;NOT RISCOS" OFF)
+dep_option(SDL_GPU_WEBGPU          "Build SDL_GPU with Emscripten/Emdawn WebGPU support" OFF "SDL_GPU;EMSCRIPTEN" OFF)
 set_option(SDL_LEAN_AND_MEAN       "Build a lean SDL library with reduced graphics functionality" ${SDL_LEAN_AND_MEAN_DEFAULT})
 
 if(EMSCRIPTEN)
@@ -3712,6 +3713,24 @@ if(SDL_GPU)
     )
     set(SDL_GPU_METAL 1)
     set(HAVE_SDL_GPU TRUE)
+  endif()
+  if(SDL_GPU_WEBGPU AND SDL_VIDEO_DRIVER_EMSCRIPTEN)
+    if(TARGET SDL3-shared OR NOT TARGET SDL3-static)
+      message(FATAL_ERROR
+        "SDL_GPU WebGPU for Emscripten/Emdawn requires -DSDL_STATIC=ON and -DSDL_SHARED=OFF "
+        "so the generated SDL3::SDL3-static target carries the required Emdawn "
+        "and Asyncify link options. Configure with -DSDL_GPU_WEBGPU=OFF for an "
+        "Emscripten SDL build without the WebGPU backend."
+      )
+    endif()
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/gpu/webgpu/*.c"
+      "${SDL3_SOURCE_DIR}/src/gpu/webgpu/*.h"
+    )
+    set(HAVE_GPU_WEBGPU 1)
+    set(HAVE_SDL_GPU TRUE)
+    target_compile_options(SDL3-static PRIVATE "--use-port=emdawnwebgpu:cpp_bindings=false")
+    target_link_options(SDL3-static INTERFACE "--use-port=emdawnwebgpu:cpp_bindings=false" "-sASYNCIFY=1")
   endif()
   if(SDL_RENDER_GPU AND HAVE_SDL_GPU)
     set(SDL_VIDEO_RENDER_GPU 1)
