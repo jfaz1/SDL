@@ -778,6 +778,7 @@ typedef struct WebGPUResourceGenerationInstrumentation
 
 struct WebGPURenderer
 {
+    bool debug_mode;
     WGPUInstance instance;
     WGPUAdapter adapter;
     WGPUDevice device;
@@ -2427,15 +2428,21 @@ static WGPUBindGroup WEBGPU_CreateBindGroup(
     const WGPUBindGroupDescriptor *bind_group_desc,
     const char *context)
 {
+    /* A scope pop waits on a future, which is an event-loop round trip under
+       Asyncify, and this runs once per bind group and so once per draw. */
+    const bool scoped = renderer->debug_mode;
     WGPUBindGroup bind_group;
 
-    if (!WEBGPU_CanWaitForErrorScope(renderer, context)) {
-        return NULL;
+    if (scoped) {
+        if (!WEBGPU_CanWaitForErrorScope(renderer, context)) {
+            return NULL;
+        }
+        wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
     }
 
-    wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
     bind_group = wgpuDeviceCreateBindGroup(renderer->device, bind_group_desc);
-    if (!WEBGPU_PopErrorScope(renderer, context)) {
+
+    if (scoped && !WEBGPU_PopErrorScope(renderer, context)) {
         if (bind_group) {
             wgpuBindGroupRelease(bind_group);
         }
@@ -2495,15 +2502,19 @@ static bool WEBGPU_CreatePipelineEmptyBindGroups(
 
 static WGPUCommandBuffer WEBGPU_FinishCommandEncoder(WebGPURenderer *renderer, WGPUCommandEncoder encoder)
 {
+    const bool scoped = renderer->debug_mode;
     WGPUCommandBuffer commands;
 
-    if (!WEBGPU_CanWaitForErrorScope(renderer, "CommandEncoderFinish")) {
-        return NULL;
+    if (scoped) {
+        if (!WEBGPU_CanWaitForErrorScope(renderer, "CommandEncoderFinish")) {
+            return NULL;
+        }
+        wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
     }
 
-    wgpuDevicePushErrorScope(renderer->device, WGPUErrorFilter_Validation);
     commands = wgpuCommandEncoderFinish(encoder, NULL);
-    if (!WEBGPU_PopErrorScope(renderer, "CommandEncoderFinish")) {
+
+    if (scoped && !WEBGPU_PopErrorScope(renderer, "CommandEncoderFinish")) {
         if (commands) {
             wgpuCommandBufferRelease(commands);
         }
@@ -15369,11 +15380,11 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debug_mode, bool prefer_low_power
     bool enable_depth_clamping = SDL_GetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_FEATURE_DEPTH_CLAMPING_BOOLEAN, true);
     SDL_GPUDevice *result;
 
-    (void)debug_mode;
     renderer = (WebGPURenderer *)SDL_calloc(1, sizeof(*renderer));
     if (!renderer) {
         return NULL;
     }
+    renderer->debug_mode = debug_mode;
     renderer->allowed_frames_in_flight = 2;
     renderer->fence_lock = SDL_CreateMutex();
     if (!renderer->fence_lock) {
